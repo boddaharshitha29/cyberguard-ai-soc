@@ -1,0 +1,204 @@
+{
+  "binary_metrics": {
+    "accuracy": 0.9996,
+    "precision": 0.9996,
+    "recall": 0.9996,
+    "f1_score": 0.9996,
+    "roc_auc": 0.99999984,
+    "detection_latency_per_flow_us": 8.57,
+    "total_test_samples": 5000,
+    "total_inference_time_sec": 0.0429,
+    "confusion_matrix": [
+      [
+        2499,
+        1
+      ],
+      [
+        1,
+        2499
+      ]
+    ],
+    "classification_report": {
+      "0": {
+        "precision": 0.9996,
+        "recall": 0.9996,
+        "f1-score": 0.9996,
+        "support": 2500.0
+      },
+      "1": {
+        "precision": 0.9996,
+        "recall": 0.9996,
+        "f1-score": 0.9996,
+        "support": 2500.0
+      },
+      "accuracy": 0.9996,
+      "macro avg": {
+        "precision": 0.9996,
+        "recall": 0.9996,
+        "f1-score": 0.9996,
+        "support": 5000.0
+      },
+      "weighted avg": {
+        "precision": 0.9996,
+        "recall": 0.9996,
+        "f1-score": 0.9996,
+        "support": 5000.0
+      }
+    }
+  },
+  "feature_importance": [
+    {
+      "Feature": "Fwd_Bwd_Packet_Ratio",
+      "Importance": 0.2585984173849112,
+      "Percentage": 25.85984173849112
+    },
+    {
+      "Feature": "Total_Fwd_Packets",
+      "Importance": 0.19239903147347162,
+      "Percentage": 19.239903147347164
+    },
+    {
+      "Feature": "Total_Bwd_Packets",
+      "Importance": 0.18506293551017847,
+      "Percentage": 18.506293551017848
+    },
+    {
+      "Feature": "Flow_IAT_Mean",
+      "Importance": 0.1394063434295836,
+      "Percentage": 13.940634342958361
+    },
+    {
+      "Feature": "Subflow_Fwd_Bytes",
+      "Importance": 0.07447478513020607,
+      "Percentage": 7.447478513020607
+    },
+    {
+      "Feature": "Flow_Packets_Sec",
+      "Importance": 0.07063352115760502,
+      "Percentage": 7.063352115760502
+    },
+    {
+      "Feature": "ACK_Flag_Count",
+      "Importance": 0.027799251088146893,
+      "Percentage": 2.7799251088146892
+    },
+    {
+      "Feature": "Flow_Bytes_Sec",
+      "Importance": 0.01869052107235232,
+      "Percentage": 1.869052107235232
+    },
+    {
+      "Feature": "SYN_Flag_Count",
+      "Importance": 0.017021741776485758,
+      "Percentage": 1.7021741776485757
+    },
+    {
+      "Feature": "Avg_Packet_Size",
+      "Importance": 0.008418591267781743,
+      "Percentage": 0.8418591267781742
+    },
+    {
+      "Feature": "Flow_Duration",
+      "Importance": 0.007283448305943654,
+      "Percentage": 0.7283448305943654
+    },
+    {
+      "Feature": "Protocol",
+      "Importance": 0.0002114124033337604,
+      "Percentage": 0.02114124033337604
+    }
+  ],
+  "model_comparison": {
+    "Decision_Tree": {
+      "train_accuracy": 1.0,
+      "test_accuracy": 0.9998,
+      "overfitting_gap": 0.00019999999999997797
+    },
+    "Random_Forest": {
+      "train_accuracy": 1.0,
+      "test_accuracy": 0.9998,
+      "overfitting_gap": 0.00019999999999997797
+    }
+  },
+  "multiclass_metrics": {
+    "accuracy": 0.9998,
+    "precision": 0.9998000799680129,
+    "recall": 0.9998,
+    "f1_score": 0.9997999399319495,
+    "roc_auc": 1.0,
+    "detection_latency_per_flow_us": 9.09,
+    "total_test_samples": 5000,
+    "total_inference_time_sec": 0.0454,
+    "confusion_matrix": [
+      [
+        2500,
+        0,
+        0,
+        0
+      ],
+      [
+        1,
+        624,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        1000,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        875
+      ]
+    ],
+    "classification_report": {
+      "0": {
+        "precision": 0.9996001599360256,
+        "recall": 1.0,
+        "f1-score": 0.9998000399920016,
+        "support": 2500.0
+      },
+      "1": {
+        "precision": 1.0,
+        "recall": 0.9984,
+        "f1-score": 0.9991993594875901,
+        "support": 625.0
+      },
+      "2": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 1000.0
+      },
+      "3": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 875.0
+      },
+      "accuracy": 0.9998,
+      "macro avg": {
+        "precision": 0.9999000399840063,
+        "recall": 0.9996,
+        "f1-score": 0.9997498498698979,
+        "support": 5000.0
+      },
+      "weighted avg": {
+        "precision": 0.9998000799680129,
+        "recall": 0.9998,
+        "f1-score": 0.9997999399319495,
+        "support": 5000.0
+      }
+    }
+  },
+  "class_mapping_multiclass": {
+    "Benign": 0,
+    "HTTP_Flood": 1,
+    "SYN_Flood": 2,
+    "UDP_Flood": 3
+  }
+}
