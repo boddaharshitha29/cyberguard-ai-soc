@@ -924,20 +924,30 @@ elif nav_choice == "📦 TAB 7: PCAP Traffic Analyzer":
 
     # Sample PCAP Quick-Load Buttons
     st.markdown("##### Or Load Pre-Packaged Capture Samples:")
-    p_c1, p_c2, p_c3 = st.columns(3)
+    p_c1, p_c2, p_c3, p_c4, p_c5 = st.columns(5)
     pcap_to_load = None
     with p_c1:
+        if st.button("⚖️ Mixed (Attack + Benign)", type="primary", use_container_width=True):
+            pcap_to_load = os.path.join(BASE_DIR, "data", "sample_pcaps", "MIXED_TRAFFIC_ATTACK_AND_BENIGN.pcap")
+    with p_c2:
+        if st.button("🚨 Pure DDoS Attack", use_container_width=True):
+            pcap_to_load = os.path.join(BASE_DIR, "data", "sample_pcaps", "PURE_DDOS_ATTACK.pcap")
+    with p_c3:
         if st.button("Load SYN Flood Sample", use_container_width=True):
             pcap_to_load = os.path.join(BASE_DIR, "data", "sample_pcaps", "syn_flood_sample.pcap")
-    with p_c2:
+    with p_c4:
         if st.button("Load UDP Flood Sample", use_container_width=True):
             pcap_to_load = os.path.join(BASE_DIR, "data", "sample_pcaps", "udp_flood_sample.pcap")
-    with p_c3:
-        if st.button("Load Benign Browsing Sample", use_container_width=True):
+    with p_c5:
+        if st.button("Load Benign Browsing", use_container_width=True):
             pcap_to_load = os.path.join(BASE_DIR, "data", "sample_pcaps", "benign_traffic_sample.pcap")
 
     target_bytes_or_path = None
     if uploaded_pcap is not None:
+        try:
+            uploaded_pcap.seek(0)
+        except Exception:
+            pass
         file_bytes = uploaded_pcap.read()
         is_valid, msg = validate_pcap_file(file_bytes)
         if not is_valid:
@@ -951,31 +961,56 @@ elif nav_choice == "📦 TAB 7: PCAP Traffic Analyzer":
         with st.spinner("Parsing packets into bidirectional 5-tuple flows..."):
             df_extracted, pcap_meta = parse_pcap_to_flows(target_bytes_or_path)
 
-        st.success(f"Successfully extracted {pcap_meta['total_flows_reconstructed']} flows from {pcap_meta['total_packets']} raw packets!")
-        
-        # Score extracted flows
-        scored_flows = []
-        for _, row in df_extracted.iterrows():
-            f_dict = row.to_dict()
-            res = engine.score_single_flow(f_dict)
-            f_dict["Verdict"] = res["prediction"]
-            f_dict["Attack_Type"] = res["attack_type"]
-            f_dict["Confidence"] = f"{res['confidence']*100:.1f}%"
-            scored_flows.append(f_dict)
+        if df_extracted.empty or pcap_meta.get("total_packets", 0) == 0:
+            st.warning("No IPv4 TCP/UDP network flows could be reconstructed from the provided capture.")
+        else:
+            st.success(f"Successfully extracted {pcap_meta['total_flows_reconstructed']} flows from {pcap_meta['total_packets']} raw packets!")
+            
+            # Score extracted flows
+            scored_flows = []
+            for _, row in df_extracted.iterrows():
+                f_dict = row.to_dict()
+                res = engine.score_single_flow(f_dict)
+                f_dict["Verdict"] = res["prediction"]
+                f_dict["Attack_Type"] = res["attack_type"]
+                f_dict["Confidence"] = f"{res['confidence']*100:.1f}%"
+                scored_flows.append(f_dict)
 
-        df_scored = pd.DataFrame(scored_flows)
-        
-        atks = (df_scored["Verdict"] == "Attack").sum()
-        bngs = (df_scored["Verdict"] == "Benign").sum()
+            df_scored = pd.DataFrame(scored_flows)
+            
+            atks = (df_scored["Verdict"] == "Attack").sum() if "Verdict" in df_scored.columns else 0
+            bngs = (df_scored["Verdict"] == "Benign").sum() if "Verdict" in df_scored.columns else 0
 
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Packets Parsed", f"{pcap_meta['total_packets']}")
-        r2.metric("Flows Reconstructed", f"{len(df_scored)}")
-        r3.metric("Attack Flows Detected", f"{atks}", delta=f"{(atks/len(df_scored))*100:.1f}% Threat")
-        r4.metric("Benign Flows", f"{bngs}")
+            r1, r2, r3, r4 = st.columns(4)
+            r1.metric("Packets Parsed", f"{pcap_meta['total_packets']}")
+            r2.metric("Flows Reconstructed", f"{len(df_scored)}")
+            r3.metric("Attack Flows Detected", f"{atks}", delta=f"{(atks/max(len(df_scored), 1))*100:.1f}% Threat")
+            r4.metric("Benign Flows", f"{bngs}")
 
-        st.markdown("##### Reconstructed Flow Telemetry Table")
-        st.dataframe(df_scored[["Src_IP", "Dst_IP", "Src_Port", "Dst_Port", "Protocol", "Flow_Packets_Sec", "SYN_Flag_Count", "Verdict", "Attack_Type", "Confidence"]], use_container_width=True)
+            st.markdown("##### Reconstructed Flow Telemetry Table")
+            display_cols = [c for c in ["Src_IP", "Dst_IP", "Src_Port", "Dst_Port", "Protocol", "Flow_Packets_Sec", "SYN_Flag_Count", "Verdict", "Attack_Type", "Confidence"] if c in df_scored.columns]
+            st.dataframe(df_scored[display_cols], use_container_width=True)
+
+            if atks > 0:
+                st.markdown("---")
+                c_btn, _ = st.columns([1, 1])
+                with c_btn:
+                    if st.button("🛡️ Stage Detected Attack IPs into Firewall Queue (Tab 8)", type="primary", use_container_width=True):
+                        fw = st.session_state.firewall_manager
+                        staged_cnt = 0
+                        for _, r in df_scored[df_scored["Verdict"] == "Attack"].iterrows():
+                            conf_val = float(str(r.get("Confidence", "99")).replace("%", "")) / 100.0
+                            fw.stage_mitigation(
+                                src_ip=str(r["Src_IP"]),
+                                dst_port=int(r.get("Dst_Port", 80)),
+                                proto=int(r.get("Protocol", 6)),
+                                attack_type=str(r.get("Attack_Type", "DDoS_Attack")),
+                                confidence=conf_val,
+                                packet_rate=float(r.get("Flow_Packets_Sec", 100.0))
+                            )
+                            staged_cnt += 1
+                        st.success(f"Successfully staged {staged_cnt} attacking IP(s) into TAB 8 Firewall Management!")
+                        st.info("Navigate to 👉 **TAB 8: Firewall Management** to review and approve active blocking rules.")
 
 
 # =============================================================================

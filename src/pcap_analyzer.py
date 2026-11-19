@@ -53,105 +53,212 @@ def validate_pcap_file(file_bytes: bytes, max_size_mb: int = 25) -> Tuple[bool, 
     return True, "Valid PCAP header detected."
 
 
-def parse_pcap_to_flows(pcap_path_or_bytes) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+def _parse_pcap_native(data_bytes: bytes) -> List[Dict[str, Any]]:
     """
-    Parses PCAP capture and groups packets into 5-tuple bidirectional flows.
+    Pure-Python robust fallback PCAP parser.
+    Parses standard IPv4, TCP/UDP packets, flags, and timestamps with zero dependencies.
     """
-    if not HAS_SCAPY:
-        raise RuntimeError("Scapy is required for PCAP parsing. Run `pip install scapy`.")
+    if len(data_bytes) < 24:
+        return []
 
-    import tempfile
-    temp_path = None
-    if isinstance(pcap_path_or_bytes, bytes):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pcap") as tmp:
-            tmp.write(pcap_path_or_bytes)
-            temp_path = tmp.name
-        packets = rdpcap(temp_path)
-    else:
-        packets = rdpcap(pcap_path_or_bytes)
+    endian = "<" if struct.unpack("<I", data_bytes[:4])[0] == 0xa1b2c3d4 else ">"
+    offset = 24
+    parsed_packets = []
 
-    if temp_path and os.path.exists(temp_path):
-        try:
-            os.remove(temp_path)
-        except Exception:
-            pass
+    while offset + 16 <= len(data_bytes):
+        hdr = data_bytes[offset:offset+16]
+        ts_sec, ts_usec, incl_len, orig_len = struct.unpack(f"{endian}IIII", hdr)
+        offset += 16
 
-    # Group packets into flows: key = (proto, ip1, port1, ip2, port2)
-    flows_dict: Dict[Tuple, List[Dict[str, Any]]] = {}
+        if offset + incl_len > len(data_bytes):
+            break
 
-    for pkt in packets:
-        if not pkt.haslayer(IP):
+        pkt_data = data_bytes[offset:offset+incl_len]
+        offset += incl_len
+        ts = float(ts_sec) + float(ts_usec) / 1_000_000.0
+
+        if len(pkt_data) < 34:
             continue
 
-        ip = pkt[IP]
-        proto = int(ip.proto)
-        src_ip = ip.src
-        dst_ip = ip.dst
-        pkt_len = int(len(pkt))
-        ts = float(pkt.time)
+        eth_type = struct.unpack("!H", pkt_data[12:14])[0]
+        ip_offset = 14
+        if eth_type == 0x8100 and len(pkt_data) >= 38:  # 802.1Q VLAN Tagged
+            eth_type = struct.unpack("!H", pkt_data[16:18])[0]
+            ip_offset = 18
 
-        src_port = 0
-        dst_port = 0
-        is_syn = 0
-        is_ack = 0
+        if eth_type != 0x0800:  # Only IPv4
+            continue
 
-        if pkt.haslayer(TCP):
-            tcp = pkt[TCP]
-            src_port = int(tcp.sport)
-            dst_port = int(tcp.dport)
-            flags = int(tcp.flags)
+        ip_header = pkt_data[ip_offset:]
+        if len(ip_header) < 20:
+            continue
+
+        ihl = (ip_header[0] & 0x0F) * 4
+        proto = int(ip_header[9])
+        src_ip = ".".join(str(b) for b in ip_header[12:16])
+        dst_ip = ".".join(str(b) for b in ip_header[16:20])
+
+        l4_data = ip_header[ihl:]
+        src_port, dst_port = 0, 0
+        is_syn, is_ack = 0, 0
+
+        if proto == 6 and len(l4_data) >= 14:  # TCP
+            src_port, dst_port = struct.unpack("!HH", l4_data[:4])
+            flags = l4_data[13]
             is_syn = 1 if (flags & 0x02) else 0
             is_ack = 1 if (flags & 0x10) else 0
-        elif pkt.haslayer(UDP):
-            udp = pkt[UDP]
-            src_port = int(udp.sport)
-            dst_port = int(udp.dport)
+        elif proto == 17 and len(l4_data) >= 4:  # UDP
+            src_port, dst_port = struct.unpack("!HH", l4_data[:4])
 
-        # Standardize bidirectional flow key
-        if (src_ip, src_port) < (dst_ip, dst_port):
-            flow_key = (proto, src_ip, src_port, dst_ip, dst_port)
-            direction = "fwd"
-        else:
-            flow_key = (proto, dst_ip, dst_port, src_ip, src_port)
-            direction = "bwd"
-
-        if flow_key not in flows_dict:
-            flows_dict[flow_key] = []
-
-        flows_dict[flow_key].append({
+        parsed_packets.append({
             "timestamp": ts,
-            "length": pkt_len,
-            "direction": direction,
+            "length": incl_len,
             "is_syn": is_syn,
             "is_ack": is_ack,
             "src_ip": src_ip,
             "dst_ip": dst_ip,
-            "src_port": src_port,
-            "dst_port": dst_port,
+            "src_port": int(src_port),
+            "dst_port": int(dst_port),
             "proto": proto
         })
 
+    return parsed_packets
+
+
+def parse_pcap_to_flows(pcap_path_or_bytes) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+    """
+    Parses PCAP capture and groups packets into 5-tuple bidirectional flows.
+    Uses Scapy when available, and automatically falls back to native binary parser.
+    """
+    raw_bytes = None
+    if isinstance(pcap_path_or_bytes, bytes):
+        raw_bytes = pcap_path_or_bytes
+    elif isinstance(pcap_path_or_bytes, str) and os.path.exists(pcap_path_or_bytes):
+        with open(pcap_path_or_bytes, "rb") as f:
+            raw_bytes = f.read()
+
+    pkt_items: List[Dict[str, Any]] = []
+
+    # Method A: Try Scapy if available in system
+    if HAS_SCAPY:
+        try:
+            from scapy.all import rdpcap as _rdpcap, IP as _IP, TCP as _TCP, UDP as _UDP
+            import tempfile
+            temp_path = None
+            if raw_bytes is not None:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pcap") as tmp:
+                    tmp.write(raw_bytes)
+                    temp_path = tmp.name
+                packets = _rdpcap(temp_path)
+            else:
+                packets = _rdpcap(pcap_path_or_bytes)
+
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+            for pkt in packets:
+                if not pkt.haslayer(_IP):
+                    continue
+                ip = pkt[_IP]
+                proto = int(ip.proto)
+                src_ip = ip.src
+                dst_ip = ip.dst
+                pkt_len = int(len(pkt))
+                ts = float(pkt.time)
+                src_port = 0
+                dst_port = 0
+                is_syn = 0
+                is_ack = 0
+
+                if pkt.haslayer(_TCP):
+                    tcp = pkt[_TCP]
+                    src_port = int(tcp.sport)
+                    dst_port = int(tcp.dport)
+                    flags = int(tcp.flags)
+                    is_syn = 1 if (flags & 0x02) else 0
+                    is_ack = 1 if (flags & 0x10) else 0
+                elif pkt.haslayer(_UDP):
+                    udp = pkt[_UDP]
+                    src_port = int(udp.sport)
+                    dst_port = int(udp.dport)
+
+                pkt_items.append({
+                    "timestamp": ts,
+                    "length": pkt_len,
+                    "is_syn": is_syn,
+                    "is_ack": is_ack,
+                    "src_ip": src_ip,
+                    "dst_ip": dst_ip,
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+                    "proto": proto
+                })
+        except Exception:
+            pkt_items = []
+
+    # Method B: Robust native fallback if Scapy was unavailable or failed
+    if not pkt_items and raw_bytes is not None:
+        pkt_items = _parse_pcap_native(raw_bytes)
+
+    # Group packets into bidirectional flows: key = (proto, min_endpoint, max_endpoint)
+    flows_dict: Dict[Tuple, List[Dict[str, Any]]] = {}
+
+    for item in pkt_items:
+        src_ip = item["src_ip"]
+        dst_ip = item["dst_ip"]
+        src_port = item["src_port"]
+        dst_port = item["dst_port"]
+        proto = item["proto"]
+
+        if (src_ip, src_port) <= (dst_ip, dst_port):
+            flow_key = (proto, src_ip, src_port, dst_ip, dst_port)
+        else:
+            flow_key = (proto, dst_ip, dst_port, src_ip, src_port)
+
+        if flow_key not in flows_dict:
+            flows_dict[flow_key] = []
+
+        flows_dict[flow_key].append(dict(item))
+
     flow_records = []
-    total_packets = len(packets)
+    total_packets = len(pkt_items)
 
     for flow_key, pkt_list in flows_dict.items():
         if not pkt_list:
             continue
 
-        proto, ip1, p1, ip2, p2 = flow_key
         pkt_list.sort(key=lambda x: x["timestamp"])
+
+        # The initial packet defines the conversation initiator (Forward Client)
+        fwd_src_ip = pkt_list[0]["src_ip"]
+        fwd_src_port = pkt_list[0]["src_port"]
+        fwd_dst_ip = pkt_list[0]["dst_ip"]
+        fwd_dst_port = pkt_list[0]["dst_port"]
+        proto = pkt_list[0]["proto"]
 
         t_start = pkt_list[0]["timestamp"]
         t_end = pkt_list[-1]["timestamp"]
         duration_sec = max(t_end - t_start, 0.0001)
         duration_us = duration_sec * 1_000_000.0
 
-        fwd_pkts = sum(1 for p in pkt_list if p["direction"] == "fwd")
-        bwd_pkts = sum(1 for p in pkt_list if p["direction"] == "bwd")
-        total_pkts = len(pkt_list)
+        fwd_pkts = 0
+        bwd_pkts = 0
+        fwd_bytes = 0
+        bwd_bytes = 0
 
+        for p in pkt_list:
+            if (p["src_ip"], p["src_port"]) == (fwd_src_ip, fwd_src_port):
+                fwd_pkts += 1
+                fwd_bytes += p["length"]
+            else:
+                bwd_pkts += 1
+                bwd_bytes += p["length"]
+
+        total_pkts = len(pkt_list)
         total_bytes = sum(p["length"] for p in pkt_list)
-        fwd_bytes = sum(p["length"] for p in pkt_list if p["direction"] == "fwd")
 
         syn_count = sum(p["is_syn"] for p in pkt_list)
         ack_count = sum(p["is_ack"] for p in pkt_list)
@@ -178,10 +285,10 @@ def parse_pcap_to_flows(pcap_path_or_bytes) -> Tuple[pd.DataFrame, Dict[str, Any
             "Flow_IAT_Mean": round(mean_iat_us, 2),
             "Subflow_Fwd_Bytes": round(float(fwd_bytes), 2),
             "Protocol": proto,
-            "Src_IP": ip1,
-            "Dst_IP": ip2,
-            "Src_Port": p1,
-            "Dst_Port": p2
+            "Src_IP": fwd_src_ip,
+            "Dst_IP": fwd_dst_ip,
+            "Src_Port": fwd_src_port,
+            "Dst_Port": fwd_dst_port
         })
 
     df_flows = pd.DataFrame(flow_records)
@@ -202,25 +309,31 @@ def generate_sample_pcaps(output_dir: str):
 
     os.makedirs(output_dir, exist_ok=True)
     
-    # 1. SYN Flood PCAP
+    # 1. SYN Flood PCAP (Multi-stream high-rate SYN flood targeting port 443)
     syn_pkts = []
     t = 1700000000.0
-    for i in range(120):
-        t += 0.0003
-        pkt = Ether() / IP(src=f"198.51.100.{10 + (i % 20)}", dst="192.168.1.50") / TCP(sport=1024 + i, dport=443, flags="S", seq=1000 + i)
-        pkt.time = t
-        syn_pkts.append(pkt)
+    for bot_idx in range(4):
+        bot_ip = f"198.51.100.{10 + bot_idx}"
+        sport = 4440 + bot_idx
+        for p_idx in range(50):
+            t += 0.0003
+            pkt = Ether() / IP(src=bot_ip, dst="192.168.1.50") / TCP(sport=sport, dport=443, flags="S", seq=1000 + p_idx)
+            pkt.time = t
+            syn_pkts.append(pkt)
     wrpcap(os.path.join(output_dir, "syn_flood_sample.pcap"), syn_pkts)
 
-    # 2. UDP Flood PCAP
+    # 2. UDP Flood PCAP (Multi-stream high-rate UDP reflection flood targeting port 53)
     udp_pkts = []
     t = 1700000000.0
-    for i in range(150):
-        t += 0.0002
-        payload = b"X" * 512
-        pkt = Ether() / IP(src=f"203.0.113.{5 + (i % 30)}", dst="192.168.1.50") / UDP(sport=5000 + i, dport=53) / payload
-        pkt.time = t
-        udp_pkts.append(pkt)
+    for bot_idx in range(4):
+        bot_ip = f"203.0.113.{5 + bot_idx}"
+        sport = 5000 + bot_idx
+        for p_idx in range(50):
+            t += 0.0002
+            payload = b"X" * 512
+            pkt = Ether() / IP(src=bot_ip, dst="192.168.1.50") / UDP(sport=sport, dport=53) / payload
+            pkt.time = t
+            udp_pkts.append(pkt)
     wrpcap(os.path.join(output_dir, "udp_flood_sample.pcap"), udp_pkts)
 
     # 3. Benign Browsing PCAP (Bidirectional 3-way handshake + HTTP transaction)
@@ -251,7 +364,12 @@ def generate_sample_pcaps(output_dir: str):
         resp.time = t; benign_pkts.append(resp)
         
     wrpcap(os.path.join(output_dir, "benign_traffic_sample.pcap"), benign_pkts)
-    print(f"[PCAP Generator] Sample test pcaps generated at {output_dir}")
+
+    # 4. Master Full-Spectrum DDoS Attack Capture (Benign handshake + Multi-vector botnet flood)
+    master_pkts = list(benign_pkts) + list(syn_pkts) + list(udp_pkts)
+    master_pkts.sort(key=lambda p: float(p.time))
+    wrpcap(os.path.join(output_dir, "ddos_attack_capture.pcap"), master_pkts)
+    print(f"[PCAP Generator] All test pcaps successfully generated at {output_dir}")
 
 
 if __name__ == "__main__":
